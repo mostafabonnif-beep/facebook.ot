@@ -2,12 +2,22 @@
 
 أداة سطح مكتب (Windows/Linux) بواجهة عربية تسحب **ريلز/فيديوهات صفحات فيسبوك** وتنزّلها ثم ترفعها تلقائياً إلى **قناة YouTube** عبر YouTube Data API v3.
 
-- الملف الذي يجب تشغيله: **`fb_youtube_uploader_v35.py`**
-- نسخ سابقة محفوظة: `fb_youtube_uploader_v34.py`, `fb_youtube_uploader_v33.py`, `fb_youtube_uploader_v32_fixed.py`, `original_1.py`
+- الملف الذي يجب تشغيله: **`fb_youtube_uploader_v36.py`**
+- النسخ السابقة في `legacy/` (v35, v34, v33, v32_fixed, original_1) للرجوع عند الحاجة.
 
 > ⚠️ استخدم الأداة فقط مع محتوى تملك حق نشره. لا تخزّن كلمات مرور فيسبوك في البرنامج، واحتفظ بملفات `client_secrets.json` ورموز `*_token.json` و`cookies.txt` في مكان خاص.
 
 ---
+
+## ما الجديد في v3.6 (اعتمادية وشفافية)
+
+| # | التحسين | التفصيل |
+|---|---|---|
+| 1 | **استئناف الرفع المنقطع** | عند انقطاع مؤقت أثناء الرفع (429/5xx) يُستأنف من **آخر بايت مرفوع** بدل إعادة الملف من الصفر (حتى 5 استئنافات). يقلّل الفشل «العشوائي» على الملفات الكبيرة. |
+| 2 | **سجل الفاشلين** | كل مقطع فشل (تنزيل/مقطع غير صالح/رفع/نفاد حصة) يُسجَّل في `failed_reels.json` مع السبب، ويُحذف تلقائياً عند نجاحه لاحقاً. |
+| 3 | **وضع «إعادة الفاشل فقط»** | خيار في تبويب الخيارات: يعيد محاولة ما فشل سابقاً **دون كشط الصفحات** — مثالي بعد نفاد الحصة أو انقطاع الشبكة. |
+| 4 | **تقرير CSV لكل جلسة** | يُكتب في `reports/session_*.csv` (بترميز يفهم Excel بالعربية): المعرّف، الصفحة، العنوان، الحالة، معرّف YouTube، وسبب الفشل. |
+| 5 | **تنظيم المستودع** | النسخ القديمة نُقلت إلى `legacy/` ليبقى الملف الحالي وحده واضحاً. |
 
 ## ما الجديد في v3.5 (رفع موثوق — حلّ مشكلة الرفع «العشوائي»)
 
@@ -60,7 +70,7 @@
 ```bat
 py -m pip install -r requirements.txt
 copy config.ini.example config.ini
-py fb_youtube_uploader_v35.py
+py fb_youtube_uploader_v36.py
 ```
 
 عدّل `config.ini` إذا كان `client_secrets.json` أو مجلد الفيديو في مسار آخر. جرّب Reel واحداً أولاً قبل وضع قائمة كبيرة.
@@ -70,7 +80,7 @@ py fb_youtube_uploader_v35.py
 ```bash
 python3 -m pip install -r requirements.txt
 cp config.ini.example config.ini
-python3 fb_youtube_uploader_v35.py
+python3 fb_youtube_uploader_v36.py
 ```
 
 يتطلب متصفح Chrome/Chromium و `chromedriver` متوافقاً معه.

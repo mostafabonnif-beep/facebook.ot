@@ -7,10 +7,12 @@ accounts.json
 uploaded_ids.txt
 stats.json
 ui_settings.json
+failed_reels.json
 errors.log
 
 # ملفات مؤقتة
 videos/
+reports/
 __pycache__/
 *.py[cod]
 .pytest_cache/

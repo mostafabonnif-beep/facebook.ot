@@ -16,11 +16,18 @@ from types import SimpleNamespace
 import pytest
 from googleapiclient.errors import HttpError
 
-MODULE_PATH = Path(__file__).with_name("fb_youtube_uploader_v35.py")
+MODULE_PATH = Path(__file__).with_name("fb_youtube_uploader_v36.py")
 spec = importlib.util.spec_from_file_location("fb2yt", MODULE_PATH)
 assert spec and spec.loader
 fixed_app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixed_app)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state(tmp_path: Path, monkeypatch):
+    """يعزل ملفات السجل/التقرير حتى لا تلمس بيانات المستخدم الحقيقية."""
+    monkeypatch.setattr(fixed_app, "REPORT_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(fixed_app, "FAILED_REELS_FILE", str(tmp_path / "failed_reels.json"))
 
 
 # ─────────────────────────── أدوات مساعدة ───────────────────────────
@@ -93,6 +100,7 @@ def _settings(**overrides) -> dict:
         "headless": True,
         "remove_tags": False,
         "newest_first": True,
+        "retry_failed_only": False,
         "anonymize_source": True,
         "optimize_video": False,
         "extra_description": "",
@@ -817,3 +825,115 @@ def test_get_youtube_reports_missing_secrets(tmp_path: Path) -> None:
     service, error = fixed_app.get_youtube("acc", secrets_file=str(tmp_path / "missing.json"))
     assert service is None
     assert error and "مفقود" in error
+
+
+# ───────────────────── سجل الفاشلين + التقرير (v3.6) ─────────────────────
+def test_failed_ledger_roundtrip() -> None:
+    fixed_app.mark_reel_failed("999", "https://facebook.com/reel/999", "صفحة", "عنوان", "فشل الرفع")
+    data = fixed_app.load_failed_reels()
+    assert "999" in data
+    assert data["999"]["reason"] == "فشل الرفع"
+    assert data["999"]["url"].endswith("/999")
+    fixed_app.clear_reel_failed("999")
+    assert fixed_app.load_failed_reels() == {}
+
+
+def test_session_report_written() -> None:
+    path = fixed_app.write_session_report([
+        {"id": "1", "page": "p", "title": "t", "status": "uploaded", "youtube_id": "y1", "reason": ""},
+        {"id": "2", "page": "p", "title": "t2", "status": "failed", "youtube_id": "", "reason": "فشل الرفع"},
+    ])
+    assert path and Path(path).exists()
+    content = Path(path).read_text(encoding="utf-8-sig")
+    assert "uploaded" in content and "فشل الرفع" in content and "y1" in content
+    assert fixed_app.write_session_report([]) is None
+
+
+def test_session_reports_do_not_overwrite_each_other() -> None:
+    """جلستان في نفس الثانية يجب أن تُنتجا ملفين مختلفين."""
+    stamp = datetime(2026, 9, 12, 10, 0, 0)
+    first = fixed_app.write_session_report(
+        [{"id": "1", "page": "p", "title": "a", "status": "uploaded", "youtube_id": "y", "reason": ""}],
+        stamp,
+    )
+    second = fixed_app.write_session_report(
+        [{"id": "2", "page": "p", "title": "b", "status": "failed", "youtube_id": "", "reason": "r"}],
+        stamp,
+    )
+    assert first != second
+    assert Path(first).exists() and Path(second).exists()
+
+
+def test_worker_records_failure_in_ledger(monkeypatch) -> None:
+    application = _make_app(monkeypatch)
+    monkeypatch.setattr(
+        fixed_app, "download_video",
+        lambda *_a, **_k: {"file": "video.mp4", "title": "t", "desc": "d"},
+    )
+    monkeypatch.setattr(fixed_app, "upload_video", lambda *_a, **_k: None)
+    monkeypatch.setattr(fixed_app, "save_uploaded_id", lambda _id: None)
+
+    application._worker(
+        [{"url": "https://facebook.com/page/reels/", "name": "page", "scroll": 1, "limit": 1}],
+        _settings(),
+    )
+    data = fixed_app.load_failed_reels()
+    assert "123" in data
+    assert data["123"]["reason"] == "فشل الرفع"
+    events = _drain_uiq(application)
+    assert events[-1][1]["failed"] == 1
+
+
+def test_worker_retry_failed_only_skips_scraping_and_clears_ledger(monkeypatch) -> None:
+    application = _make_app(monkeypatch)
+    monkeypatch.setattr(fixed_app, "get_reels",
+                        lambda *_a, **_k: pytest.fail("يجب ألا يكشط الصفحات في وضع إعادة الفاشل"))
+    fixed_app.mark_reel_failed("999", "https://facebook.com/reel/999", "صفحة", "t", "فشل الرفع")
+    monkeypatch.setattr(
+        fixed_app, "download_video",
+        lambda *_a, **_k: {"file": "video.mp4", "title": "عنوان", "desc": "وصف"},
+    )
+    monkeypatch.setattr(fixed_app, "upload_video", lambda *_a, **_k: "vid-1")
+    monkeypatch.setattr(fixed_app, "save_uploaded_id", lambda _id: None)
+
+    application._worker(
+        [{"url": "https://facebook.com/page/reels/", "name": "page", "scroll": 1, "limit": 1}],
+        _settings(retry_failed_only=True),
+    )
+    assert fixed_app.load_failed_reels() == {}  # نجح فحُذف من السجل
+    events = _drain_uiq(application)
+    assert events[-1][1]["uploaded"] == 1
+
+
+# ───────────────────── استئناف الرفع المنقطع (v3.6) ─────────────────────
+class ResumingRequest:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def next_chunk(self):
+        self.calls += 1
+        if self.calls == 1:
+            raise _http_error(429, "rateLimitExceeded")
+        return None, {"id": "vid-resumed"}
+
+
+class ResumeYouTube:
+    def __init__(self) -> None:
+        self.request = ResumingRequest()
+
+    def videos(self):
+        return self
+
+    def insert(self, **_kwargs):
+        return self.request
+
+
+def test_upload_resumes_after_transient_chunk_failure(monkeypatch, tmp_path: Path) -> None:
+    video_file = tmp_path / "clip.mp4"
+    video_file.write_bytes(b"video-bytes")
+    monkeypatch.setattr(fixed_app.time, "sleep", lambda *_a: None)
+
+    youtube = ResumeYouTube()
+    result = fixed_app.upload_video(youtube, {"file": str(video_file), "title": "t", "desc": "d"})
+    assert result == "vid-resumed"
+    assert youtube.request.calls == 2  # انقطاع واحد ثم استئناف ناجح
