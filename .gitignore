@@ -1,0 +1,17 @@
+# بيانات محلية وحساسة — لا تُرفع إلى المستودع
+config.ini
+client_secrets.json
+cookies.txt
+*_token.json
+accounts.json
+uploaded_ids.txt
+stats.json
+ui_settings.json
+errors.log
+
+# ملفات مؤقتة
+videos/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tmp

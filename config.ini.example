@@ -1,0 +1,10 @@
+[SETTINGS]
+# مجلد حفظ ملفات الفيديو المؤقتة؛ يفضّل مساراً يحتوي مساحة كافية.
+VIDEO_DIRECTORY = videos/
+
+# المسار إلى ملف OAuth Client Secrets الذي أنشأته في Google Cloud.
+CLIENT_SECRETS_FILE = client_secrets.json
+
+# (اختياري) ملف كوكيز فيسبوك بصيغة Netscape لتنزيل محتوى يتطلب تسجيل دخول.
+# اتركه كما هو إن لم تحتجه؛ سيُتجاهل تلقائياً إذا لم يوجد الملف.
+COOKIES_FILE = cookies.txt
