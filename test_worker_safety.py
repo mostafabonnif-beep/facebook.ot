@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from googleapiclient.errors import HttpError
 
-MODULE_PATH = Path(__file__).with_name("fb_youtube_uploader_v34.py")
+MODULE_PATH = Path(__file__).with_name("fb_youtube_uploader_v35.py")
 spec = importlib.util.spec_from_file_location("fb2yt", MODULE_PATH)
 assert spec and spec.loader
 fixed_app = importlib.util.module_from_spec(spec)
@@ -654,20 +654,154 @@ def test_playlist_failure_does_not_duplicate_upload(tmp_path: Path) -> None:
     assert result == "youtube-video-id"
 
 
-def test_upload_returns_quota_error_on_403(tmp_path: Path) -> None:
+def test_upload_returns_quota_error_on_quota_403(tmp_path: Path) -> None:
     video_file = tmp_path / "clip.mp4"
     video_file.write_bytes(b"video-bytes")
     data = {"file": str(video_file), "title": "t", "desc": "d"}
+    quota = HttpError(FakeResp(403, "Forbidden"),
+                      b'{"error":{"errors":[{"reason":"quotaExceeded"}]}}')
 
     class QuotaVideos:
         def insert(self, **_kwargs):
-            raise HttpError(FakeResp(403, "Forbidden"), b"{}")
+            raise quota
 
     class QuotaYouTube:
         def videos(self):
             return QuotaVideos()
 
     assert fixed_app.upload_video(QuotaYouTube(), data, log_cb=None) == "QUOTA_ERROR"
+
+
+# ─────────────────────────── تصنيف أخطاء الرفع (v3.5) ───────────────────────────
+def _http_error(status: int, reason: str) -> HttpError:
+    body = json.dumps({"error": {"errors": [{"reason": reason}]}}).encode() if reason else b"{}"
+    return HttpError(FakeResp(status), body)
+
+
+def test_classify_quota_error() -> None:
+    assert fixed_app.classify_upload_error(_http_error(403, "quotaExceeded")) == "quota"
+    assert fixed_app.classify_upload_error(_http_error(403, "dailyLimitExceeded")) == "quota"
+
+
+def test_classify_rate_limit_is_retryable() -> None:
+    """429 وتحديد المعدل مؤقتان — كانا يوقفان العملية خطأً في السابق."""
+    assert fixed_app.classify_upload_error(_http_error(429, "rateLimitExceeded")) == "retryable"
+    assert fixed_app.classify_upload_error(_http_error(403, "userRateLimitExceeded")) == "retryable"
+    assert fixed_app.classify_upload_error(_http_error(503, "backendError")) == "retryable"
+
+
+def test_classify_forbidden_is_auth_and_bad_request_is_fatal() -> None:
+    assert fixed_app.classify_upload_error(_http_error(403, "")) == "auth"
+    assert fixed_app.classify_upload_error(_http_error(400, "invalidMetadata")) == "fatal"
+    assert fixed_app.classify_upload_error(_http_error(401, "")) == "fatal"
+
+
+def test_backoff_grows() -> None:
+    d1 = fixed_app._backoff_seconds(1)
+    d2 = fixed_app._backoff_seconds(2)
+    assert 8 <= d1 <= 12
+    assert d2 >= 24
+    assert fixed_app._backoff_seconds(10) <= 304  # بحد أقصى ~300 + رجّة
+
+
+class FlakyYouTube:
+    """يرفع خطأً في أول N محاولة ثم ينجح."""
+
+    def __init__(self, failures) -> None:
+        self.failures = list(failures)
+        self.calls = 0
+
+    def videos(self):
+        return self
+
+    def insert(self, **_kwargs):
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return FakeUploadRequest()
+
+
+def test_upload_retries_rate_limit_then_succeeds(monkeypatch, tmp_path: Path) -> None:
+    video_file = tmp_path / "clip.mp4"
+    video_file.write_bytes(b"video-bytes")
+    data = {"file": str(video_file), "title": "t", "desc": "d"}
+    monkeypatch.setattr(fixed_app.time, "sleep", lambda *_a: None)
+
+    youtube = FlakyYouTube([_http_error(429, "rateLimitExceeded"),
+                            _http_error(503, "")])
+    result = fixed_app.upload_video(youtube, data, log_cb=None)
+    assert result == "youtube-video-id"
+    assert youtube.calls == 3  # فشلتان ثم نجاح
+
+
+def test_upload_does_not_retry_on_auth_error(monkeypatch, tmp_path: Path) -> None:
+    video_file = tmp_path / "clip.mp4"
+    video_file.write_bytes(b"video-bytes")
+    data = {"file": str(video_file), "title": "t", "desc": "d"}
+    monkeypatch.setattr(fixed_app.time, "sleep", lambda *_a: None)
+
+    youtube = FlakyYouTube([_http_error(403, "")])
+    assert fixed_app.upload_video(youtube, data, log_cb=None) is None
+    assert youtube.calls == 1  # لا إعادة محاولة على خطأ صلاحيات
+
+
+def test_upload_does_not_retry_on_quota(monkeypatch, tmp_path: Path) -> None:
+    video_file = tmp_path / "clip.mp4"
+    video_file.write_bytes(b"video-bytes")
+    data = {"file": str(video_file), "title": "t", "desc": "d"}
+    monkeypatch.setattr(fixed_app.time, "sleep", lambda *_a: None)
+
+    youtube = FlakyYouTube([_http_error(403, "quotaExceeded")])
+    assert fixed_app.upload_video(youtube, data, log_cb=None) == "QUOTA_ERROR"
+    assert youtube.calls == 1
+
+
+# ─────────────────────────── التحقق بعد الرفع (v3.5) ───────────────────────────
+class ListYouTube:
+    def __init__(self, items) -> None:
+        self._items = items
+
+    def videos(self):
+        return self
+
+    def list(self, **_kwargs):
+        return self
+
+    def execute(self):
+        return {"items": self._items}
+
+
+def test_verify_upload_warns_when_public_requested_but_private() -> None:
+    messages: list[str] = []
+    youtube = ListYouTube([{"status": {"privacyStatus": "private"}}])
+    status = fixed_app.verify_upload(youtube, "vid", "public", None, messages.append)
+    assert status == {"privacyStatus": "private"}
+    assert any("غير مُدقّق" in m or "private" in m for m in messages)
+
+
+def test_verify_upload_accepts_schedule() -> None:
+    messages: list[str] = []
+    youtube = ListYouTube([{"status": {"privacyStatus": "private",
+                                       "publishAt": "2026-09-13T10:00:00Z"}}])
+    fixed_app.verify_upload(youtube, "vid", "private",
+                            datetime(2026, 9, 13, 10, 0, tzinfo=timezone.utc), messages.append)
+    assert any("الجدولة مقبولة" in m for m in messages)
+
+
+def test_verify_upload_flags_missing_publish_at() -> None:
+    messages: list[str] = []
+    youtube = ListYouTube([{"status": {"privacyStatus": "private"}}])
+    fixed_app.verify_upload(youtube, "vid", "private",
+                            datetime(2026, 9, 13, 10, 0, tzinfo=timezone.utc), messages.append)
+    assert any("لم يقبل وقت الجدولة" in m for m in messages)
+
+
+def test_verify_upload_is_soft_on_failure() -> None:
+    class BrokenYouTube:
+        def videos(self):
+            raise RuntimeError("no scope")
+
+    assert fixed_app.verify_upload(BrokenYouTube(), "vid", "public", None, None) is None
 
 
 # ─────────────────────────── تخزين المعرّفات ───────────────────────────

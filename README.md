@@ -2,12 +2,22 @@
 
 أداة سطح مكتب (Windows/Linux) بواجهة عربية تسحب **ريلز/فيديوهات صفحات فيسبوك** وتنزّلها ثم ترفعها تلقائياً إلى **قناة YouTube** عبر YouTube Data API v3.
 
-- الملف الذي يجب تشغيله: **`fb_youtube_uploader_v34.py`**
-- نسخ سابقة محفوظة: `fb_youtube_uploader_v33.py`, `fb_youtube_uploader_v32_fixed.py`, `original_1.py`
+- الملف الذي يجب تشغيله: **`fb_youtube_uploader_v35.py`**
+- نسخ سابقة محفوظة: `fb_youtube_uploader_v34.py`, `fb_youtube_uploader_v33.py`, `fb_youtube_uploader_v32_fixed.py`, `original_1.py`
 
 > ⚠️ استخدم الأداة فقط مع محتوى تملك حق نشره. لا تخزّن كلمات مرور فيسبوك في البرنامج، واحتفظ بملفات `client_secrets.json` ورموز `*_token.json` و`cookies.txt` في مكان خاص.
 
 ---
+
+## ما الجديد في v3.5 (رفع موثوق — حلّ مشكلة الرفع «العشوائي»)
+
+| # | التحسين | التفصيل |
+|---|---|---|
+| 1 | **تصنيف أخطاء YouTube** | `classify_upload_error` يميّز: **نفاد الحصة اليومية** (quotaExceeded → إيقاف)، **تحديد المعدل المؤقت** (429/rateLimitExceeded → إعادة محاولة)، **الصلاحيات** (403 بلا سبب → إيقاف فوري)، **خطأ طلب** (400/401/404 → إيقاف). |
+| 2 | **إصلاح الخلل الأخطر** | سابقاً كان **429 (تحديد معدل مؤقت)** يُعامَل كأنه نفاد حصة فيُوقف كل العملية — وهذا سبب رئيسي لما يبدو «رفعاً عشوائياً». الآن يُعاد بمهلة. |
+| 3 | **تراجع أسّي مع رجّة** | 8 → 24 → 72 ثانية (حد 300) بدل فاصل ثابت 8 ثوانٍ، لاجتياز الاضطرابات المؤقتة. |
+| 4 | **التحقق بعد الرفع** | `verify_upload` يقرأ حالة الفيديو الفعلية: يكشف **الفيديو المرفوع الذي بقي `private`** لأن مشروع Google غير مُدقّق (Unverified)، ويتحقق من **قبول وقت الجدولة** (`publishAt`). |
+| 5 | **نطاق إضافي** | أُضيف `youtube.readonly` لإتاحة التحقق. **إن سبق أن ربطت قناتك، احذف `*_token.json` وأعد الربط** لتُمنح الصلاحية الجديدة. |
 
 ## ما الجديد في v3.4 (استخراج + عناوين + برمجة مقطع + إخفاء المصدر)
 
@@ -50,7 +60,7 @@
 ```bat
 py -m pip install -r requirements.txt
 copy config.ini.example config.ini
-py fb_youtube_uploader_v34.py
+py fb_youtube_uploader_v35.py
 ```
 
 عدّل `config.ini` إذا كان `client_secrets.json` أو مجلد الفيديو في مسار آخر. جرّب Reel واحداً أولاً قبل وضع قائمة كبيرة.
@@ -60,7 +70,7 @@ py fb_youtube_uploader_v34.py
 ```bash
 python3 -m pip install -r requirements.txt
 cp config.ini.example config.ini
-python3 fb_youtube_uploader_v34.py
+python3 fb_youtube_uploader_v35.py
 ```
 
 يتطلب متصفح Chrome/Chromium و `chromedriver` متوافقاً معه.
