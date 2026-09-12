@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║   FB → YouTube Uploader  v3.5 (Reliable Upload)              ║
+║   FB → YouTube Uploader  v3.6 (Resilient Pipeline)              ║
 ║   سحب ريلز/فيديوهات فيسبوك ورفعها إلى YouTube تلقائياً        ║
 ║   v3.4: استخراج أذكى (روابط دقيقة + كشف جدار الدخول)،         ║
 ║         عناوين/وصف نظيف بلا اسم الصفحة المصدر، فحص المقطع     ║
@@ -12,32 +12,53 @@
 ╚══════════════════════════════════════════════════════════════╝
 """
 
-import time, os, re, json, glob, logging, random, threading, queue, configparser, shutil, subprocess
+import sys
+import time, os, re, json, glob, csv, logging, random, threading, queue, configparser, shutil, subprocess
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse, parse_qsl
 
-import yt_dlp
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException
+# ── فحص مبدئي بأخطاء مفهومة بدل انهيار غامض عند نقص المكتبات ──
+try:
+    import tkinter as tk
+    from tkinter import messagebox, ttk, filedialog
+except ImportError:
+    print(
+        "❌ Tkinter غير مثبت.\n"
+        "  Windows: أعد تثبيت Python مع خيار «tcl/tk and IDLE».\n"
+        "  Linux:   sudo apt install python3-tk",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from google.auth.transport.requests import Request
-from googleapiclient.errors import HttpError
+try:
+    import yt_dlp
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import StaleElementReferenceException
 
-import tkinter as tk
-from tkinter import messagebox, ttk, filedialog
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+    from google.auth.transport.requests import Request
+    from googleapiclient.errors import HttpError
+except ImportError as error:
+    print(
+        f"❌ مكتبة ناقصة: {error}\n"
+        "شغّل أولاً داخل مجلد المشروع:\n"
+        "  py -m pip install -r requirements.txt\n"
+        "ثم أعد تشغيل البرنامج. (أو شغّل doctor.py لفحص البيئة كاملة.)",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 # ════════════════════════════════════════════════════
 # CONSTANTS & CONFIG
 # ════════════════════════════════════════════════════
-VERSION = "3.5"
+VERSION = "3.6"
 
 BG      = "#0f0f1a"
 CARD    = "#161625"
@@ -72,13 +93,15 @@ UPLOADED_IDS_FILE   = "uploaded_ids.txt"
 ACCOUNTS_FILE       = "accounts.json"
 STATS_FILE          = "stats.json"
 UI_SETTINGS_FILE    = "ui_settings.json"
+FAILED_REELS_FILE   = "failed_reels.json"
+REPORT_DIR          = "reports"
 MAX_RETRIES         = 3
 RETRY_DELAY         = 8
+# عدد مرات استئناف الرفع داخل نفس الجلسة عند انقطاع مؤقت (لا يُعيد الملف من الصفر).
+MAX_CHUNK_RETRIES   = 5
 
 # أقل مهلة يقبلها YouTube عملياً لوقت النشر المجدول.
 MIN_SCHEDULE_LEAD_MINUTES = 15
-# حالات لا فائدة من إعادة المحاولة عليها (خطأ في الطلب/التفويض).
-NON_RETRYABLE_UPLOAD_STATUSES = {400, 401, 404}
 
 FFMPEG_BIN  = shutil.which("ffmpeg")
 FFPROBE_BIN = shutil.which("ffprobe")
@@ -183,6 +206,80 @@ def disk_free_gb():
     except OSError as error:
         logger.warning("تعذر قراءة مساحة القرص: %s", error)
         return 0
+
+
+# ─────────────── سجل الفاشلين + تقرير الجلسة (v3.6) ───────────────
+def load_failed_reels():
+    """سجل المقاطع التي فشل تنزيلها/رفعها لإعادة محاولتها لاحقاً."""
+    if os.path.exists(FAILED_REELS_FILE):
+        try:
+            with open(FAILED_REELS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, ValueError) as error:
+            logger.warning("تعذر قراءة %s: %s", FAILED_REELS_FILE, error)
+    return {}
+
+
+def save_failed_reels(data):
+    if not data:
+        try:
+            if os.path.exists(FAILED_REELS_FILE):
+                os.remove(FAILED_REELS_FILE)
+        except OSError:
+            pass
+        return
+    tmp_path = FAILED_REELS_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, FAILED_REELS_FILE)
+
+
+def mark_reel_failed(source_id, url, page, title, reason):
+    data = load_failed_reels()
+    data[str(source_id)] = {
+        "url": url,
+        "page": page,
+        "title": title or "",
+        "reason": reason or "غير معروف",
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    save_failed_reels(data)
+
+
+def clear_reel_failed(source_id):
+    data = load_failed_reels()
+    if str(source_id) in data:
+        data.pop(str(source_id))
+        save_failed_reels(data)
+
+
+def write_session_report(rows, started_at=None):
+    """يكتب تقرير CSV لكل جلسة (بترميز يفهمه Excel بالعربية)."""
+    if not rows:
+        return None
+    try:
+        os.makedirs(REPORT_DIR, exist_ok=True)
+        stamp = (started_at or datetime.now()).strftime("%Y%m%d_%H%M%S")
+        base = os.path.join(REPORT_DIR, f"session_{stamp}")
+        path = base + ".csv"
+        counter = 1
+        # جلستان خلال نفس الثانية لا يجب أن تتلاشى إحداهما.
+        while os.path.exists(path):
+            counter += 1
+            path = f"{base}_{counter}.csv"
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=["id", "page", "title", "status", "youtube_id", "reason"]
+            )
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in writer.fieldnames})
+        return path
+    except OSError as error:
+        logger.warning("تعذر كتابة تقرير الجلسة: %s", error)
+        return None
 
 
 def sanitize_account_name(name):
@@ -930,10 +1027,28 @@ def upload_video(youtube, video_data, privacy="public", playlist_id=None, tags=N
             media = MediaFileUpload(video_data["file"], chunksize=1024 * 1024, resumable=True)
             request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
             response = None
+            chunk_failures = 0
+            last_pct = 0
             while response is None:
-                status, response = request.next_chunk()
-                if status and log_cb:
-                    log_cb(f"⬆️ جاري الرفع: {int(status.progress() * 100)}%", replace_last=True)
+                try:
+                    status, response = request.next_chunk()
+                except HttpError as error:
+                    # انقطاع مؤقت أثناء الرفع: نستأنف من آخر بايت مرفوع بدل البدء من الصفر.
+                    if classify_upload_error(error) == "retryable" and chunk_failures < MAX_CHUNK_RETRIES:
+                        chunk_failures += 1
+                        delay = _backoff_seconds(chunk_failures)
+                        if log_cb:
+                            log_cb(
+                                f"⚠️ انقطاع أثناء الرفع ({_http_status(error)}) — استئناف من "
+                                f"{last_pct}% بعد {int(delay)} ثانية…"
+                            )
+                        time.sleep(delay)
+                        continue
+                    raise
+                if status:
+                    last_pct = int(status.progress() * 100)
+                    if log_cb:
+                        log_cb(f"⬆️ جاري الرفع: {last_pct}%", replace_last=True)
 
             vid_id = response.get("id")
             if not vid_id:
@@ -1089,9 +1204,9 @@ class StatsCard:
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"🎬 FB → YouTube Uploader v{VERSION} (Extraction & Media)")
+        self.root.title(f"🎬 FB → YouTube Uploader v{VERSION}")
         self.root.configure(bg=BG)
-        self.root.geometry("1050x900")
+        self._setup_window()
 
         self._stop = threading.Event()
         self._thread = None
@@ -1106,10 +1221,28 @@ class App:
 
         self._apply_styles()
         self._build_header()
-        self._build_nb()
+        # مهم: الشريط السفلي (أزرار البدء/الإيقاف) يُحزم قبل الجدول الممتد،
+        # وإلا فقد يُقتطع ويختفي على الشاشات القصيرة.
         self._build_footer()
+        self._build_nb()
         self._restore_settings()
         self._poll()
+
+    def _setup_window(self):
+        """يضبط حجم النافذة لتناسب الشاشة فعلياً.
+
+        كان الحجم مفروضاً 1050x900، فيختفي شريط الأزرار على أي شاشة أقصر من 900px
+        (لابتوبات 768px مثلاً) — كانت الأزرار تُنشأ لكنها لا تُعرض إطلاقاً.
+        """
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        width = min(1080, max(860, screen_w - 60))
+        height = min(900, max(560, screen_h - 90))
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 3)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.minsize(820, 540)
+        logger.info("نافذة %sx%s على شاشة %sx%s", width, height, screen_w, screen_h)
 
     def _apply_styles(self):
         s = ttk.Style(); s.theme_use("clam")
@@ -1300,6 +1433,10 @@ class App:
         ttk.Checkbutton(inn, text="البدء بالأحدث أولاً (ترتيب حسب معرّف الفيديو)",
                         variable=self.newest_first_var).pack(anchor="w", pady=4)
 
+        self.retry_failed_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(inn, text="إعادة محاولة الفاشل فقط (من سجل الفشل، بدون كشط الصفحات)",
+                        variable=self.retry_failed_var).pack(anchor="w", pady=4)
+
         r1 = tk.Frame(inn, bg=CARD); r1.pack(fill="x", pady=10)
         tk.Label(r1, text="تأخير بين الفيديوهات (ثواني):", bg=CARD, fg=TXT).pack(side="left")
         self.delay_e = PEntry(r1, width=8); self.delay_e.insert(0, "10")
@@ -1464,6 +1601,7 @@ class App:
             self.del_after_var.set(bool(s.get("delete_after_upload", True)))
             self.remove_tags_var.set(bool(s.get("remove_tags", False)))
             self.newest_first_var.set(bool(s.get("newest_first", True)))
+            self.retry_failed_var.set(bool(s.get("retry_failed_only", False)))
             self.anonymize_var.set(bool(s.get("anonymize_source", True)))
             self.optimize_var.set(bool(s.get("optimize_video", True)))
             self.sched_var.set(bool(s.get("schedule_enabled", False)))
@@ -1502,6 +1640,7 @@ class App:
             "headless": self.headless_var.get(),
             "remove_tags": self.remove_tags_var.get(),
             "newest_first": self.newest_first_var.get(),
+            "retry_failed_only": self.retry_failed_var.get(),
             "anonymize_source": self.anonymize_var.get(),
             "optimize_video": self.optimize_var.get(),
             "extra_description": self.desc_e.get("1.0", "end").strip(),
@@ -1551,6 +1690,8 @@ class App:
         downloaded = 0
         fatal_error = None
         stopped = False
+        started_at = datetime.now()
+        report_rows = []
         try:
             uploaded_ids = load_uploaded_ids()
             yt, error = get_youtube(settings["account"])
@@ -1561,7 +1702,19 @@ class App:
 
             self._log("✅ متصل بـ YouTube API")
             all_reels = []
-            for page in pages:
+
+            # وضع «إعادة الفاشل فقط»: نتجاوز كشط الصفحات ونعالج ما فشل سابقاً.
+            if settings.get("retry_failed_only"):
+                for source_id, entry in load_failed_reels().items():
+                    if entry.get("url"):
+                        all_reels.append({
+                            "url": entry["url"],
+                            "id": source_id,
+                            "page": entry.get("page") or "",
+                        })
+                self._log(f"♻️ وضع إعادة الفاشل فقط: {len(all_reels)} مقطع من سجل الفشل.")
+
+            for page in ([] if settings.get("retry_failed_only") else pages):
                 if self._stop.is_set():
                     stopped = True
                     break
@@ -1625,6 +1778,9 @@ class App:
                     break
                 if not video_data:
                     fail_count += 1
+                    mark_reel_failed(reel["id"], reel["url"], reel["page"], "", "فشل التنزيل")
+                    report_rows.append({"id": reel["id"], "page": reel["page"], "title": "",
+                                        "status": "failed", "youtube_id": "", "reason": "فشل التنزيل"})
                     continue
                 downloaded += 1
 
@@ -1632,9 +1788,16 @@ class App:
                 if settings.get("optimize_video", True):
                     ok, _probe = probe_video(video_data["file"], self._log)
                     if not ok:
-                        self._log(f"⚠️ المقطع غير صالح ({', '.join(_probe.get('problems', []))})؛ سيتخطى.")
+                        problems = ", ".join(_probe.get("problems", []))
+                        self._log(f"⚠️ المقطع غير صالح ({problems})؛ سيتخطى.")
                         _cleanup_artifacts(video_data["file"])
                         fail_count += 1
+                        mark_reel_failed(reel["id"], reel["url"], reel["page"],
+                                         video_data.get("title", ""), f"مقطع غير صالح: {problems}")
+                        report_rows.append({"id": reel["id"], "page": reel["page"],
+                                            "title": video_data.get("title", ""),
+                                            "status": "failed", "youtube_id": "",
+                                            "reason": f"مقطع غير صالح: {problems}"})
                         continue
                     processed = finalize_video(video_data["file"], self._log)
                     if processed and processed != video_data["file"] and os.path.isfile(processed):
@@ -1664,11 +1827,22 @@ class App:
                 )
                 if result == "QUOTA_ERROR":
                     fatal_error = "توقفت العملية لأن حصة رفع YouTube اليومية نفدت."
+                    mark_reel_failed(reel["id"], reel["url"], reel["page"],
+                                     video_data.get("title", ""), "نفدت الحصة اليومية")
+                    report_rows.append({"id": reel["id"], "page": reel["page"],
+                                        "title": video_data.get("title", ""),
+                                        "status": "failed", "youtube_id": "",
+                                        "reason": "نفدت الحصة اليومية"})
                     break
                 if result:
                     save_uploaded_id(reel["id"])
                     uploaded_ids.add(reel["id"])
+                    clear_reel_failed(reel["id"])
                     up_count += 1
+                    report_rows.append({"id": reel["id"], "page": reel["page"],
+                                        "title": video_data.get("title", ""),
+                                        "status": "uploaded", "youtube_id": result,
+                                        "reason": ""})
                     if settings["delete_after_upload"]:
                         try:
                             os.remove(video_data["file"])
@@ -1677,6 +1851,12 @@ class App:
                             self._log(f"⚠️ رُفع الفيديو لكن تعذر حذف الملف المحلي: {error}")
                 else:
                     fail_count += 1
+                    mark_reel_failed(reel["id"], reel["url"], reel["page"],
+                                     video_data.get("title", ""), "فشل الرفع")
+                    report_rows.append({"id": reel["id"], "page": reel["page"],
+                                        "title": video_data.get("title", ""),
+                                        "status": "failed", "youtube_id": "",
+                                        "reason": "فشل الرفع"})
 
                 self._uiq.put(("progress", int((index / total) * 100)))
                 if index < total and not self._stop.is_set():
@@ -1707,6 +1887,12 @@ class App:
                 save_stats(self.stats)
             except OSError:
                 logger.exception("تعذر حفظ الإحصاءات")
+            report_path = write_session_report(report_rows, started_at)
+            if report_path:
+                self._log(f"📄 تقرير الجلسة: {report_path}")
+            remaining_failed = len(load_failed_reels())
+            if remaining_failed:
+                self._log(f"♻️ سجل الفشل: {remaining_failed} مقطع — فعّل «إعادة الفاشل فقط» للمحاولة مجدداً.")
             self._log(f"🏁 انتهى! مرفوع: {up_count}, فاشل: {fail_count}, محمّل: {downloaded}")
             self._uiq.put(("finished", {
                 "uploaded": up_count, "failed": fail_count,

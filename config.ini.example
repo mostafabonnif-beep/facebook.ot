@@ -1,10 +1,73 @@
 [SETTINGS]
 # مجلد حفظ ملفات الفيديو المؤقتة؛ يفضّل مساراً يحتوي مساحة كافية.
 VIDEO_DIRECTORY = videos/
-
 # المسار إلى ملف OAuth Client Secrets الذي أنشأته في Google Cloud.
 CLIENT_SECRETS_FILE = client_secrets.json
+# الحساب النشط (يُدار من الواجهة أيضاً).
+ACCOUNT = account1
+# خصوصية الرفع: public / private / unlisted
+PRIVACY = public
+HEADLESS = true
+DELETE_AFTER_UPLOAD = true
+REMOVE_TAGS = false
+BETWEEN_VIDEOS = 10
+DAILY_QUOTA = 10000
+MAX_ATTEMPTS = 3
+MIN_DISK_GB = 2
 
-# (اختياري) ملف كوكيز فيسبوك بصيغة Netscape لتنزيل محتوى يتطلب تسجيل دخول.
-# اتركه كما هو إن لم تحتجه؛ سيُتجاهل تلقائياً إذا لم يوجد الملف.
+[WATCH]
+# بدء المراقبة تلقائياً عند فتح البرنامج (الواجهة تحفظه أيضاً).
+AUTO_START = false
+# فاصل الفحص بالدقائق (يُستخدم في الواجهة و--cli).
+INTERVAL_MINUTES = 10
+FAST_SCRAPE = true
+
+[STUDIO]
+# تُدار كل هذه القيم من الواجهة وتُحفظ هنا تلقائياً؛
+# وضع --cli يقرأها من هنا مباشرة.
+TITLE_PREFIX =
+TITLE_SUFFIX =
+CATEGORY = 25
+TITLE_OPTIMIZE = true
+AUTO_SHORTS = true
+AUTO_HASHTAGS = true
+DEDUPE_CONTENT = true
+CREDIT_LINE =
+EXTRA_DESCRIPTION =
+TAGS = Facebook,Reel,Shorts
+# قيم افتراضية لنموذج إضافة صفحة
+PG_SCROLL = 5
+PG_LIMIT = 30
+
+# الشعار (يتطلب ffmpeg)
+LOGO_ENABLED = false
+LOGO_PATH = logo.png
+LOGO_POSITION = أعلى اليمين
+LOGO_SCALE = 18
+LOGO_OPACITY = 100
+LOGO_COVER_OLD = true
+
+# الجدولة الذكية
+SCHEDULE = false
+SCHEDULE_MIN = 20
+SCHEDULE_MAX = 60
+
+# فلاتر المدة
+MIN_DURATION = 0
+MAX_DURATION = 0
+
+# كوكيز فيسبوك — صدّرها بإضافة Get cookies.txt LOCALLY بعد تسجيل الدخول.
+# ⚠️ ملف سري.
 COOKIES_FILE = cookies.txt
+COOKIES_ENABLED = false
+
+# Telegram (اختياري): إذا وضعت التوكن والمحادثة تُفعّل الإشعارات.
+TELEGRAM_TOKEN =
+TELEGRAM_CHAT_ID =
+TELEGRAM_ERRORS = true
+
+[AI]
+# التحسين بالذكاء الاصطناعي — المفاتيح في ai_keys.json (أضفها من تبويب 🤖).
+ENABLED = false
+MODEL = gemini-2.5-flash
+STYLE = احترافي متوازن
