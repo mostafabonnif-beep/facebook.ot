@@ -1,7 +1,7 @@
 # تقرير التجربة الفعلية + ما ينقص المشروع ليعمل
 
 تاريخ التجربة: 2026-09-12 · بيئة الاختبار: Linux sandbox (Chrome 150, ffmpeg, Python 3.10)
-الملف المُختبر: `fb_youtube_uploader_v34.py` (كوميت `573f3e6`)
+الملف المُختبر: `fb_youtube_uploader_v34.py` (وقتها) — النسخة الحالية: `fb_youtube_uploader_v36.py`
 
 ---
 
@@ -74,6 +74,6 @@ copy config.ini.example config.ini
 
 REM 2) ضع client_secrets.json بجانب البرنامج (من Google Cloud — Production)
 REM 3) صدّر cookies.txt من فيسبوك وضعه بجانب البرنامج (اختياري لكن موصى به)
-py fb_youtube_uploader_v34.py
+py fb_youtube_uploader_v36.py
 ```
 ثم: أضف صفحة واحدة، اربط القناة، وجرّب **ريلاً واحداً** قبل القائمة الكبيرة.
