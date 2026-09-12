@@ -196,10 +196,21 @@ HASHTAG_RE = re.compile(r"#\w+")
 # ضجيج إحصائي فيسبوكي يتسلل إلى العناوين الأصلية.
 JUNK_STATS = re.compile(
     r"\b\d[\d.,]*\s*[kKmMbB]?\s*"
-    r"(views?|مشاهدة|مشاهدات|likes?|إعجاب|تفاعل|تفاعلات|comments?|تعليق|تعليقات|"
+    r"(views?|مشاهدة|مشاهدات|likes?|إعجاب|تفاعل|تفاعلات|reactions?|comments?|تعليق|تعليقات|"
     r"shares?|مشاركة|مشاركات|followers?|متابع|متابعين)\b",
     re.IGNORECASE,
 )
+# فواصل زخرفية تتبقى في أطراف العنوان بعد تنظيف الضجيج واسم الصفحة.
+EDGE_SEPARATORS = " \t·•|«»\"'\\-—_:؛,.…"
+
+
+def _name_variants(name):
+    """أشكال الاسم الشائعة: كما هو، بلا مسافات، وبالمسافات بدل الشرطة السفلية."""
+    raw = (name or "").strip()
+    if not raw:
+        return set()
+    variants = {raw, raw.replace(" ", ""), raw.replace("_", " ")}
+    return {v.strip() for v in variants if v.strip()}
 
 
 def sanitize_public_text(text, page_name="", remove_hashtags=False,
@@ -221,19 +232,20 @@ def sanitize_public_text(text, page_name="", remove_hashtags=False,
         text = MENTION_RE.sub(" ", text)
     text = INVALID_TITLE_CHARS.sub(" ", text)
 
-    # إخفاء اسم الصفحة المصدر بكل صيغه الشائعة
-    if page_name:
-        for variant in {page_name, page_name.replace(" ", ""), page_name.replace("_", " ")}:
-            variant = variant.strip()
-            if variant:
-                text = re.sub(re.escape(variant), " ", text, flags=re.IGNORECASE)
+    # إخفاء اسم الصفحة المصدر بكل صيغه الشائعة (يقبل اسماً واحداً أو قائمة)
+    names = page_name if isinstance(page_name, (list, tuple, set)) else [page_name]
+    for name in names:
+        for variant in _name_variants(name):
+            text = re.sub(re.escape(variant), " ", text, flags=re.IGNORECASE)
 
     if keep_newlines:
-        text = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines())
+        text = "\n".join(
+            re.sub(r"[ \t]+", " ", line).strip(EDGE_SEPARATORS) for line in text.splitlines()
+        )
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
     else:
         text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return text.strip(EDGE_SEPARATORS).strip()
 
 
 def _truncate_smart(text, limit=100):
@@ -704,6 +716,7 @@ def download_video(url, page_name="", log_cb=None, retries=MAX_RETRIES,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "merge_output_format": "mp4",
         "retries": 10,
         "socket_timeout": 60,
@@ -727,9 +740,15 @@ def download_video(url, page_name="", log_cb=None, retries=MAX_RETRIES,
                 if not file_path:
                     raise FileNotFoundError("اكتمل الاستخراج لكن لم يُعثر على ملف MP4 الناتج.")
 
-                title = build_title(info.get("title", ""), page_name, remove_tags, anonymize)
+                # نخفي المصدر تلقائياً: اسم الصفحة من الواجهة + اسم الرافع/القناة من yt-dlp.
+                source_names = [page_name]
+                for extra_name in (info.get("uploader"), info.get("channel"), info.get("uploader_id")):
+                    if extra_name:
+                        source_names.append(extra_name)
+
+                title = build_title(info.get("title", ""), source_names, remove_tags, anonymize)
                 description = build_description(
-                    info.get("description") or "", page_name, anonymize=anonymize
+                    info.get("description") or "", source_names, anonymize=anonymize
                 )
                 size_mb = round(os.path.getsize(file_path) / (1024 ** 2), 1)
                 if log_cb:

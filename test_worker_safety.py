@@ -309,6 +309,28 @@ def test_sanitize_removes_page_name_case_insensitive_latin() -> None:
     assert "comedy club" not in text.lower()
 
 
+def test_sanitize_handles_real_facebook_title_pattern() -> None:
+    """النمط الحقيقي لعناوين فيسبوك: إحصاءات · إحصاءات | العنوان | اسم الصفحة."""
+    raw = ("35K views · 576 reactions | موسم جني الطماطم الصناعية "
+           "بقالمة.. مصدر رزق موسمي | Elwatania TV")
+    out = fixed_app.build_title(raw, ["Elwatania TV"])
+    assert "views" not in out
+    assert "reactions" not in out
+    assert "Elwatania" not in out
+    assert not out.startswith("·") and not out.endswith("|")
+    assert "موسم جني الطماطم" in out
+
+
+def test_sanitize_accepts_list_of_names() -> None:
+    out = fixed_app.sanitize_public_text("Elwatania TV يقدم من قناة elwatania", ["Elwatania TV", "elwatania"])
+    assert "elwatania" not in out.lower()
+
+
+def test_sanitize_strips_edge_separators() -> None:
+    assert fixed_app.sanitize_public_text("· | عنوان نظيف |") == "عنوان نظيف"
+    assert fixed_app.sanitize_public_text("— عنوان —") == "عنوان"
+
+
 def test_sanitize_removes_page_name_without_spaces_variant() -> None:
     text = fixed_app.sanitize_public_text("Best of ComedyClub weekly", "Comedy Club")
     assert "comedyclub" not in text.lower()
